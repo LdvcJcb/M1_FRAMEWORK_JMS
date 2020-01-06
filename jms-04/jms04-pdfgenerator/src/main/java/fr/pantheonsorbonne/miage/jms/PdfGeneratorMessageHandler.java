@@ -1,8 +1,9 @@
-package fr.pantheonsorbonne.ufr27.miage.jms;
+package fr.pantheonsorbonne.miage.jms;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.io.StringWriter;
+import java.io.InputStream;
+import java.io.StringReader;
 
 import javax.annotation.PostConstruct;
 import javax.enterprise.context.ApplicationScoped;
@@ -20,11 +21,12 @@ import javax.jms.TextMessage;
 import javax.xml.bind.JAXBContext;
 import javax.xml.bind.JAXBException;
 
+import fr.pantheonsorbonne.miage.diploma.DiplomaGenerator;
+import fr.pantheonsorbonne.miage.diploma.MiageDiplomaGenerator;
 import fr.pantheonsorbonne.ufr27.miage.DiplomaInfo;
-import fr.pantheonsorbonne.ufr27.miage.dto.BinaryDiplomaDTO;
 
 @ApplicationScoped
-public class BinaryDiplomaManager implements Closeable {
+public class PdfGeneratorMessageHandler implements Closeable {
 
 	@Inject
 	@Named("diplomaRequests")
@@ -38,8 +40,8 @@ public class BinaryDiplomaManager implements Closeable {
 	private ConnectionFactory connectionFactory;
 
 	private Connection connection;
-	private MessageConsumer binDiplomaConsumer;
-	private MessageProducer diplomaRequestProducer;
+	private MessageConsumer diplomaRequestConsummer;
+	private MessageProducer diplomaFileProducer;
 
 	private Session session;
 
@@ -49,59 +51,80 @@ public class BinaryDiplomaManager implements Closeable {
 			connection = connectionFactory.createConnection("nicolas", "nicolas");
 			connection.start();
 			session = connection.createSession();
-			binDiplomaConsumer = session.createConsumer(filesQueue);
-			diplomaRequestProducer = session.createProducer(requestsQueue);
+			diplomaRequestConsummer = session.createConsumer(requestsQueue);
+			diplomaFileProducer = session.createProducer(filesQueue);
+
 		} catch (JMSException e) {
 			throw new RuntimeException(e);
 		}
 
 	}
 
-	public BinaryDiplomaDTO consume() {
-
-		// receive a Byte Message from the consumer
-		// create a byte array sized after the message's payload body length
-		// read the message on the byte array
-		// create a BinaryDiplomaDTO containing the id of the diploma and the data
-		// return the DTO
-
+	public void consume() {
+		
+		// receive a text message from the consummer
+		// create a jaxbcontext, binding the DiplomaInfo class
+		// unmarshall the texte message body with the JaxBcontext
+		// use the handledReceivedDiplomaSpect method to generate the diploma an send it through the wire
 		try {
-			BytesMessage msg = (BytesMessage)binDiplomaConsumer.receive();
-			byte[] data = new byte[(int) msg.getBodyLength()];
-			msg.readBytes(data);
-			BinaryDiplomaDTO binDip = new BinaryDiplomaDTO ();
-			binDip.setId(msg.getIntProperty("id"));
-			binDip.setData(data);
-			return binDip;
-
-		} catch (JMSException e) {
-			System.out.println("FAILED TO CONSUME THE MESSAGE");
-			return null;
-		}
-
+			TextMessage msg = (TextMessage)diplomaRequestConsummer.receive();
+			JAXBContext jxbc = JAXBContext.newInstance(DiplomaInfo.class);
+			DiplomaInfo diploma = (DiplomaInfo)jxbc.createUnmarshaller()
+					.unmarshal(new StringReader(msg.getText()));
+			handledReceivedDiplomaSpect(diploma);
+			} catch (JAXBException | JMSException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+			System.out.println("FAILED TO CONSUME MESSAGE");
 		
 	}
 
-	public void requestBinDiploma(DiplomaInfo info) {
+	private void handledReceivedDiplomaSpect(DiplomaInfo diploma) {
 
-		// create a String writer
-		// create a JaxBContext, and bount DiplomaInfo.class
-		// create a Marshaller and marshall the class in the writer
-		// send a text Message containing the JAXB-marshalled object through the wire
-		try {
-			StringWriter sw = new StringWriter();
-			JAXBContext jxbc = JAXBContext.newInstance(DiplomaInfo.class);
-			jxbc.createMarshaller().marshal(info, sw);
-			this.diplomaRequestProducer.send(this.session.createTextMessage(sw.toString()));
-		} catch (JAXBException | JMSException e) {
+		// create a new MIageDiplomaGenerator Instance from the diploma Info
+		// get the content (inputstream ) from the generator
+		// create an array of bytes having the size of the inputstream
+		// read the inputstream data into the adday
+		// use the sendBinary sendBinaryDiploma function to send the diploma through the
+		// write
+		// close the IS
+		
+		try {DiplomaGenerator dipGen = new MiageDiplomaGenerator(diploma.getStudent());
+			InputStream content = dipGen.getContent();
+			byte[] data = new byte[content.available()];
+			content.read(data);
+			this.sendBinaryDiploma(diploma, data);
+			content.close();
+		} catch (IOException e) {
 			// TODO Auto-generated catch block
-			System.out.println("Request failed");		}	
+			System.out.println("Failet to generate diploma");;
+		}
+		
+
+	}
+
+	public void sendBinaryDiploma(DiplomaInfo info, byte[] data) {
+		//	create a new byte message using the session object
+		// set an IntProperty on the message containing the id of the diploma
+		// write the bytes into the bytesmessage
+		// send the message through the producer
+		try{
+			BytesMessage msg = this.session.createBytesMessage();
+			msg.setIntProperty("id", info.getId());
+			msg.writeBytes(data);
+			this.diplomaFileProducer.send(msg);
+		}catch (JMSException e) {
+			System.out.println("Failed to send diploma request");
+		}
+		
 	}
 
 	@Override
 	public void close() throws IOException {
 		try {
-			binDiplomaConsumer.close();
+			diplomaFileProducer.close();
+			diplomaRequestConsummer.close();
 			session.close();
 			connection.close();
 		} catch (JMSException e) {
